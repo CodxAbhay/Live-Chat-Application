@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chat</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet" />
+  <style>
+    .chat { display: flex; height: calc(100vh - 56px); }
+    .sidebar { width: 240px; border-right: 1px solid #ddd; padding: 1rem; }
+    .messages { flex: 1; display: flex; flex-direction: column; }
+    .history { flex: 1; overflow: auto; padding: 1rem; }
+    .typing { padding: 0 1rem; font-style: italic; color: #666; }
+    .form { display: flex; padding: .5rem; border-top: 1px solid #ddd; }
+    .input { flex: 1; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; }
+    .send { margin-left: .5rem; }
+    .message-entry { margin-bottom: 1rem; padding: .5rem; border-bottom: 1px solid #eee; position: relative; }
+    .message-header { font-weight: bold; font-size: .9rem; color: #333; }
+    .message-text { margin: .25rem 0; }
+    .seen-count { font-size: .8rem; color: #666; cursor: help; }
+    .placeholder { text-align: center; color: #999; margin-top: 2rem; }
+    .delete-msg { position: absolute; top: 0.5rem; right: 0.5rem; border: none; background: transparent; color: #c00; cursor: pointer; }
+    .chan-btn { display: block; width: 100%; text-align: left; margin-bottom: .5rem; }
+  </style>
+</head>
+<body class="d-flex flex-column">
+  <nav class="navbar navbar-dark bg-primary">
+    <div class="container-fluid">
+      <span class="navbar-brand">Premium Chat</span>
+      <a href="/logout" class="btn btn-outline-light">Logout</a>
+    </div>
+  </nav>
+  <div class="chat">
+    <aside class="sidebar">
+      <h5>Channels</h5>
+      <ul id="rooms" class="list-unstyled">
+        <% rooms.forEach(r => { %>
+          <li>
+            <button class="btn btn-sm btn-outline-secondary chan-btn" onclick="join('<%= r.name %>')"><%= r.name %></button>
+            <% if (r.createdBy === user.username) { %>
+              <button class="btn btn-sm btn-danger" onclick="socket.emit('deleteRoom', '<%= r.name %>')">🗑</button>
+            <% } %>
+          </li>
+        <% }) %>
+      </ul>
+      <button id="new-room" class="btn btn-sm btn-success w-100">+ Add Channel</button>
+    </aside>
+    <section class="messages">
+      <div id="history" class="history"></div>
+      <div id="typing" class="typing"></div>
+      <div class="form">
+        <input id="input" class="input" placeholder="Type a message..." />
+        <button id="send" class="send btn btn-primary">Send</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    const socket = io();
+    let currentRoom = '';
+    let initialJoined = false;
+
+    socket.on('connect', () => console.log('🔗 Socket connected'));
+
+    function clearHistory() {
+      const h = document.getElementById('history');
+      h.innerHTML = '<div class="placeholder">No messages yet.</div>';
+    }
+
+    window.onload = () => {
+      document.getElementById('new-room').onclick = () => {
+        const n = prompt('Channel name');
+        if (n) socket.emit('newRoom', n);
+      };
+
+      const input = document.getElementById('input');
+      const sendBtn = document.getElementById('send');
+
+      function sendMessage() {
+        const t = input.value.trim();
+        if (!t || !currentRoom) return;
+        socket.emit('chatMessage', { room: currentRoom, text: t });
+        input.value = '';
+        socket.emit('stopTyping', currentRoom);
+      }
+
+      sendBtn.onclick = sendMessage;
+
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
+      });
+
+      input.addEventListener('input', () => {
+        if (!currentRoom) return;
+        socket.emit('typing', currentRoom);
+        clearTimeout(window._typingTimeout);
+        window._typingTimeout = setTimeout(
+          () => socket.emit('stopTyping', currentRoom), 700
+        );
+      });
+
+      socket.on('roomList', rooms => {
+        const ul = document.getElementById('rooms');
+        ul.innerHTML = '';
+        rooms.forEach(r => {
+          const li = document.createElement('li');
+          const b = document.createElement('button');
+          b.className = 'btn btn-sm btn-outline-secondary chan-btn';
+          b.textContent = r.name;
+          b.onclick = () => join(r.name);
+          li.appendChild(b);
+
+          if (r.createdBy === '<%= user.username %>') {
+            const d = document.createElement('button');
+            d.className = 'btn btn-sm btn-danger';
+            d.textContent = '🗑';
+            d.onclick = () => socket.emit('deleteRoom', r.name);
+            li.appendChild(d);
+          }
+
+          ul.appendChild(li);
+        });
+
+        if (!initialJoined && rooms.length) { join(rooms[0].name); initialJoined = true; }
+      });
+
+      socket.on('history', ms => {
+        if (!ms.length) clearHistory(); else { document.getElementById('history').innerHTML=''; ms.forEach(render); }
+      });
+
+      socket.on('message', m => {
+        const first = document.getElementById('history').firstChild;
+        if (first && first.classList?.contains('placeholder')) document.getElementById('history').innerHTML='';
+        render(m);
+      });
+
+      socket.on('messageDeleted', id => {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+      });
+
+      socket.on('typing', u => document.getElementById('typing').textContent = `${u} is typing...`);
+      socket.on('stopTyping', () => document.getElementById('typing').textContent = '');
+      socket.on('seenUpdate', d => {
+        const e = document.getElementById(d.id);
+        if (e) {
+          const s = e.querySelector('.seen-count');
+          if (s) { s.textContent = `Seen by ${d.seenBy.length}`; s.title = d.seenBy.join(', '); }
+        }
+      });
+    };
+
+    function join(r) {
+      currentRoom = r;
+      socket.emit('joinRoom', r);
+      clearHistory();
+    }
+
+    function render(m) {
+      const entry = document.createElement('div');
+      entry.id = m._id;
+      entry.className = 'message-entry';
+
+      // Header
+      const header = document.createElement('div');
+      header.className = 'message-header';
+      header.innerHTML = `${m.user} <small>${new Date(m.time).toLocaleTimeString()}</small>`;
+      entry.appendChild(header);
+
+      // Text
+      const textDiv = document.createElement('div');
+      textDiv.className = 'message-text';
+      textDiv.innerHTML = marked.parseInline(m.text);
+      entry.appendChild(textDiv);
+
+      // Delete button (if owner)
+      if (m.user === '<%= user.username %>') {
+        const btn = document.createElement('button');
+        btn.className = 'delete-msg';
+        btn.innerHTML = '<i class="bi bi-trash-fill"></i>';
+        btn.onclick = () => socket.emit('deleteMessage', m._id);
+        entry.appendChild(btn);
+      }
+
+      // Seen count
+      const seenDiv = document.createElement('div');
+      seenDiv.className = 'seen-count';
+      seenDiv.title = m.seenBy.join(', ');
+      seenDiv.textContent = `Seen by ${m.seenBy.length}`;
+      entry.appendChild(seenDiv);
+
+      document.getElementById('history').appendChild(entry);
+      entry.scrollIntoView();
+      socket.emit('seen', { messageId: m._id });
+    }
+  </script>
+</body>
+</html>
